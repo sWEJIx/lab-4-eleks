@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "lab 4 eleks": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "https://localhost:53374;http://localhost:53375"
+    }
+  }
+}
