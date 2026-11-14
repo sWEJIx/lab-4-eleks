@@ -59,7 +59,7 @@ flowchart LR
     User(["👤 Користувач"])
     CI(["⚙️ GitHub Actions / Сервер"])
 
-    subgraph Система управління замовленнями (Web API)
+    subgraph System ["Система управління замовленнями (Web API)"]
         UC1(["Реєстрація та Вхід (Microsoft Identity)"])
         UC2(["Створення замовлення"])
         UC3(["Валідація DTO (FluentValidation)"])
