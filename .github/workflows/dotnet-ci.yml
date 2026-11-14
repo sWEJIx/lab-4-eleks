@@ -1,4 +1,4 @@
-﻿name: .NET CI Pipeline (Build & Unit Tests)
+﻿name: .NET CI/CD Pipeline (Build, Test & Deploy to Render)
 
 on:
   push:
@@ -27,3 +27,59 @@ jobs:
 
     - name: Run Unit Tests
       run: dotnet test --no-build --configuration Release --verbosity normal
+
+  deploy-to-render:
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Trigger Render Continuous Deployment Webhook
+      env:
+        RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+      run: |
+        if [ -n "$RENDER_DEPLOY_HOOK_URL" ]; then
+          curl -fsSL -X POST "$RENDER_DEPLOY_HOOK_URL"
+          echo "Деплой на Render успішно запущено!"
+        else
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+         echo "Секрет RENDER_DEPLOY_HOOK_URL ще не задано в GitHub Secrets."
+    
+    fi
+
