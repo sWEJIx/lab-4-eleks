@@ -9,7 +9,7 @@ using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Отримуємо рядок підключення до БД Neon (підтримує і формат Host=..., і формат postgresql://...)
+// Підключення до БД Neon PostgreSQL (або InMemory для тестів)
 var rawConnectionString = builder.Configuration.GetConnectionString("DefaultConnection")
                           ?? Environment.GetEnvironmentVariable("DATABASE_URL");
 
@@ -29,7 +29,11 @@ builder.Services.AddAuthorization();
 builder.Services.AddIdentityApiEndpoints<IdentityUser>()
     .AddEntityFrameworkStores<AppDbContext>();
 
+// Реєстрація Конкретного Репозиторію, Unit of Work та BLL сервісу
+builder.Services.AddScoped<IOrderRepository, OrderRepository>();
+builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 builder.Services.AddScoped<IOrderService, OrderService>();
+
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 
@@ -61,17 +65,33 @@ builder.Services.AddValidatorsFromAssemblyContaining<CreateOrderDtoValidator>();
 
 var app = builder.Build();
 
-// Автоматичне створення таблиць у базі даних Neon при запуску контейнера
+// ЗАВДАННЯ ІЗ ЗІРОЧКОЮ: Автоматична перевірка та накат міграцій БД при старті
 using (var scope = app.Services.CreateScope())
 {
     try
     {
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        db.Database.EnsureCreated();
+        if (db.Database.IsRelational())
+        {
+            var pendingMigrations = db.Database.GetPendingMigrations().ToList();
+            if (pendingMigrations.Any())
+            {
+                Console.WriteLine($"Знайдено {pendingMigrations.Count} нових міграцій. Застосовуємо...");
+                db.Database.Migrate();
+            }
+            else
+            {
+                db.Database.EnsureCreated();
+            }
+        }
+        else
+        {
+            db.Database.EnsureCreated();
+        }
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"Попередження ініціалізації БД: {ex.Message}");
+        Console.WriteLine($"Попередження ініціалізації/міграції БД: {ex.Message}");
     }
 }
 
@@ -85,7 +105,7 @@ app.UseAuthorization();
 
 app.MapIdentityApi<IdentityUser>();
 app.MapControllers();
-app.MapGet("/", () => "Сервер успішно задеплоєно! Додано Neon PostgreSQL, Render CD, Unit Tests та FluentValidation. Перейдіть на /swagger");
+app.MapGet("/", () => "Сервер успішно задеплоєно! Реалізовано Unit of Work, конкретний репозиторій, авто-міграції, Neon PostgreSQL, Render CD, Unit Tests та FluentValidation. Перейдіть на /swagger");
 
 app.Run();
 
@@ -111,7 +131,7 @@ static string NormalizePostgresConnectionString(string raw)
 }
 
 // =====================================================================
-// 1. ШАР ДАНИХ (DAL)
+// 1. ШАР ДАНИХ (DAL) — Моделі та Контекст
 // =====================================================================
 public class Order
 {
@@ -129,7 +149,73 @@ public class AppDbContext : IdentityDbContext<IdentityUser>
 }
 
 // =====================================================================
-// 2. КАСТОМНІ ВИКЛЮЧЕННЯ (Custom Exceptions)
+// 2. КОНКРЕТНИЙ РЕПОЗИТОРІЙ ТА UNIT OF WORK
+// =====================================================================
+public interface IRepository<T> where T : class
+{
+    Task AddAsync(T entity);
+}
+
+public class Repository<T> : IRepository<T> where T : class
+{
+    protected readonly AppDbContext _db;
+    public Repository(AppDbContext db) => _db = db;
+
+    public async Task AddAsync(T entity) => await _db.Set<T>().AddAsync(entity);
+}
+
+// Конкретний репозиторій для замовлень зі специфічними методами
+public interface IOrderRepository : IRepository<Order>
+{
+    Task<List<Order>> GetOrdersByUserIdAsync(string userId);
+    Task<Order?> GetOrderByIdAndUserAsync(int id, string userId);
+}
+
+public class OrderRepository : Repository<Order>, IOrderRepository
+{
+    public OrderRepository(AppDbContext db) : base(db) { }
+
+    public async Task<List<Order>> GetOrdersByUserIdAsync(string userId)
+    {
+        return await _db.Orders
+            .Where(o => o.UserId == userId)
+            .ToListAsync();
+    }
+
+    public async Task<Order?> GetOrderByIdAndUserAsync(int id, string userId)
+    {
+        return await _db.Orders
+            .FirstOrDefaultAsync(o => o.Id == id && o.UserId == userId);
+    }
+}
+
+// Unit of Work, який об'єднує конкретні репозиторії
+public interface IUnitOfWork : IDisposable
+{
+    IOrderRepository Orders { get; }
+    Task<int> SaveChangesAsync();
+}
+
+public class UnitOfWork : IUnitOfWork
+{
+    private readonly AppDbContext _db;
+    private IOrderRepository? _orderRepository;
+
+    public UnitOfWork(AppDbContext db, IOrderRepository? orderRepository = null)
+    {
+        _db = db;
+        _orderRepository = orderRepository;
+    }
+
+    public IOrderRepository Orders => _orderRepository ??= new OrderRepository(_db);
+
+    public async Task<int> SaveChangesAsync() => await _db.SaveChangesAsync();
+
+    public void Dispose() => _db.Dispose();
+}
+
+// =====================================================================
+// 3. КАСТОМНІ ВИКЛЮЧЕННЯ (Custom Exceptions)
 // =====================================================================
 public class CustomNotFoundException : Exception
 {
@@ -142,7 +228,7 @@ public class BusinessRuleException : Exception
 }
 
 // =====================================================================
-// 3. FLUENT VALIDATION ДЛЯ DTO
+// 4. FLUENT VALIDATION ДЛЯ DTO
 // =====================================================================
 public record CreateOrderDto(string ProductName, int Quantity, decimal UnitPrice);
 public record OrderDto(int Id, string ProductName, int Quantity, decimal TotalPrice);
@@ -164,7 +250,7 @@ public class CreateOrderDtoValidator : AbstractValidator<CreateOrderDto>
 }
 
 // =====================================================================
-// 4. GLOBAL EXCEPTION HANDLER MIDDLEWARE
+// 5. GLOBAL EXCEPTION HANDLER MIDDLEWARE
 // =====================================================================
 public class GlobalExceptionMiddleware
 {
@@ -207,7 +293,7 @@ public class GlobalExceptionMiddleware
 }
 
 // =====================================================================
-// 5. ШАР БІЗНЕС-ЛОГІКИ (BLL)
+// 6. ШАР БІЗНЕС-ЛОГІКИ (BLL) — використовує Unit of Work та IOrderRepository
 // =====================================================================
 public interface IOrderService
 {
@@ -218,20 +304,25 @@ public interface IOrderService
 
 public class OrderService : IOrderService
 {
-    private readonly AppDbContext _db;
-    public OrderService(AppDbContext db) => _db = db;
+    private readonly IUnitOfWork _uow;
+
+    // Основний конструктор для Dependency Injection (приймає Unit of Work)
+    public OrderService(IUnitOfWork uow) => _uow = uow;
+
+    // Додатковий конструктор для сумісності з існуючими Unit-тестами
+    public OrderService(AppDbContext db) : this(new UnitOfWork(db)) { }
 
     public async Task<List<OrderDto>> GetUserOrdersAsync(string userId)
     {
-        return await _db.Orders
-            .Where(o => o.UserId == userId)
+        var orders = await _uow.Orders.GetOrdersByUserIdAsync(userId);
+        return orders
             .Select(o => new OrderDto(o.Id, o.ProductName, o.Quantity, o.TotalPrice))
-            .ToListAsync();
+            .ToList();
     }
 
     public async Task<OrderDto> GetOrderByIdAsync(int id, string userId)
     {
-        var order = await _db.Orders.FirstOrDefaultAsync(o => o.Id == id && o.UserId == userId);
+        var order = await _uow.Orders.GetOrderByIdAndUserAsync(id, userId);
         if (order == null)
             throw new CustomNotFoundException($"Замовлення з ID {id} не знайдено.");
 
@@ -244,7 +335,7 @@ public class OrderService : IOrderService
             throw new BusinessRuleException("Кількість та ціна мають бути більшими за 0.");
 
         decimal total = dto.Quantity * dto.UnitPrice;
-        if (dto.Quantity >= 5) total *= 0.9m;
+        if (dto.Quantity >= 5) total *= 0.9m; // 10% знижка при замовленні від 5 одиниць
 
         var order = new Order
         {
@@ -254,15 +345,15 @@ public class OrderService : IOrderService
             UserId = userId
         };
 
-        _db.Orders.Add(order);
-        await _db.SaveChangesAsync();
+        await _uow.Orders.AddAsync(order);
+        await _uow.SaveChangesAsync();
 
         return new OrderDto(order.Id, order.ProductName, order.Quantity, order.TotalPrice);
     }
 }
 
 // =====================================================================
-// 6. КОНТРОЛЕР
+// 7. КОНТРОЛЕР
 // =====================================================================
 [ApiController]
 [Route("api/[controller]")]
